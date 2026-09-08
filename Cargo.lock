@@ -273,12 +273,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glam"
-version = "0.30.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0e9b6647e9b41d3a5ef02964c6be01311a7f2472fea40595c635c6d046c259e"
-
-[[package]]
 name = "half"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -694,10 +688,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "randomshader"
+name = "ratnest"
 version = "0.1.0"
 dependencies = [
- "glam",
  "image",
  "rand 0.9.0",
  "rand_chacha 0.9.0",
