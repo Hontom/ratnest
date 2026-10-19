@@ -4,5 +4,8 @@
     * [ ] expression weights
     * [ ] hard limit on depth
     * [ ] any number of variables w/ weights
-* [x] X, Y -> n variables
-* [ ] MAKE IT WORK
+* [ ] X, Y -> n variables
+* [ ] Tree -> Bytecode (polish notation?)
+* [ ] Move image generation outta here
+* [ ] Custom operators
+* [ ] put in modules

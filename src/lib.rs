@@ -1,9 +1,5 @@
-use std::{
-    f32::consts::PI,
-    fmt::{Display, Write},
-};
+use std::f32::consts::PI;
 
-use image::{Rgb, RgbImage};
 use rand::{
     Rng, SeedableRng,
     distr::{Distribution, Uniform, weighted::WeightedIndex},
@@ -11,23 +7,166 @@ use rand::{
 use rand_chacha::ChaCha20Rng;
 
 #[derive(Debug, Clone)]
-enum Expr {
-    /// Indexes into provided weights array.
+enum ExprInner {
+    /// Zero-indexed reference to an input variable (e.g., x = `Variable(0)` and y = `Variable(1)`).
     Variable(usize),
+    /// A constant value.
     Literal(f32),
+    /// An operation on one or more expressions (arity dependent on function/operator).
     Operation(Box<Operation>),
 }
 
+/// A numeric expression that accepts a set number of input parameters.
+pub struct Expr {
+    num_variables: usize,
+    inner_expr: ExprInner,
+}
+
+/// Options used to generate a random expression. [`RandExprCfg::default()`] returns the default options.
+#[derive(Clone, Copy, Debug)]
+pub struct RandExprCfg<'a> {
+    /// The number of input (independent) variables (parameters) the expression is going to take.
+    ///
+    /// DEFAULT: `1`
+    pub num_variables: usize,
+    /// The chance that generating an expression will go "deeper" (choose an operation instead of a constant or variable) is `1 / (depth + 1) * weight_go_deeper`, with `depth` starting at 0.
+    ///
+    /// DEFAULT: `25.0`
+    pub weight_go_deeper: f32,
+    /// The relative chances that any variable is chosen. Slice must have exactly as many elements as there are input variables in the expression. The `None` variant is interpreted as uniform chance across all variables.
+    ///
+    /// DEFAULT: `None`
+    ///
+    /// # Example
+    /// Let's say you have three input variables: `x`, `y`, and `z`, which respectively get mapped to variable indices 0, 1, and 2. If you want `x` to have a 50% chance of being selected and `y` and `z` each to have a 25% chance, you could use:
+    /// ```
+    /// RandomExprOptions {
+    ///     // ...
+    ///     variable_weights: Some(&[2.0, 1.0, 1.0]),
+    ///     // ...
+    /// }
+    /// ```
+    ///
+    /// You could have equivalently chosen `[0.5, 0.25, 0.25]` or `[12.2, 6.1, 6.1]`.
+    pub variable_weights: Option<&'a [f32]>,
+    // TODO: more! see `todo.md`
+}
+
+impl<'a> RandExprCfg<'a> {
+    // Returns the default configuration for random expression generation.
+    pub fn default() -> Self {
+        Self {
+            num_variables: 1,
+            weight_go_deeper: 25.0,
+            variable_weights: None,
+        }
+    }
+
+    /// Finalizes the config into a wrapper that ratnest functions accept.
+    ///
+    /// This is just here to ensure the data entered into the config is valid. `RandExprCfgFinal` has no public fields.
+    pub fn finalize(self) -> Result<RandExprCfgFinal<'a>, RandExprCfgFinalizeErr> {
+        if let Some(weights) = self.variable_weights
+            && weights.len() != self.num_variables
+        {
+            return Err(RandExprCfgFinalizeErr::VariableCountMismatch);
+        }
+
+        if !self.weight_go_deeper.is_finite() || self.weight_go_deeper < 0.0 {
+            return Err(RandExprCfgFinalizeErr::InvalidDepthWeight);
+        }
+
+        Ok(RandExprCfgFinal(self))
+    }
+}
+
+/// The finalized version of a [`RandExprCfg`], the existence of which guarantees its validity (no public fields!) hence it is the config type that ratnest functions accept.
+#[derive(Clone, Copy)]
+pub struct RandExprCfgFinal<'a>(RandExprCfg<'a>);
+
+/// The problems that could have been encountered during the conversion from the [`RandExprCfg`] to the [`RandExprCfgFinal`].
+#[derive(Debug, Clone, Copy)]
+pub enum RandExprCfgFinalizeErr {
+    /// There is a mismatch between the length of the per-variable lists and the number of variables.
+    VariableCountMismatch,
+    /// The depth was invalid (Negative, Infinity, NaN).
+    InvalidDepthWeight,
+}
+
 impl Expr {
-    fn random<R: Rng + ?Sized>(rng: &mut R, depth: u32) -> Expr {
+    /// Generate a random expression, using a given random number generator.
+    pub fn generate_with_rng<R: Rng + ?Sized>(
+        rng: &mut R,
+        cfg_final: RandExprCfgFinal<'_>,
+    ) -> Self {
+        Self {
+            num_variables: cfg_final.0.num_variables,
+            inner_expr: ExprInner::generate_with_rng(rng, 0, cfg_final),
+        }
+    }
+
+    /// Generate a random expression.
+    ///
+    /// This function uses [`rand_chacha::ChaCha20Rng`] for a random number generator internally. If you wish to use your own, see [`random_with_rng()`](Expr::random_with_rng).
+    pub fn generate(config: RandExprCfgFinal<'_>) -> Self {
+        let mut rng = ChaCha20Rng::from_os_rng();
+
+        Self::generate_with_rng(&mut rng, config)
+    }
+
+    /// Evaluates the expression, passing in the variables provided.
+    pub fn eval(&self, vars: &[f32]) -> f32 {
+        // ugly?
+        assert_eq!(vars.len(), self.num_variables);
+
+        self.inner_expr.eval(vars)
+    }
+
+    /// Returns the range of the expression given each variable's domain, using `num_samples` random samples.
+    // TODO: also pass rng here
+    pub fn range(&self, domain: &[(f32, f32)], num_samples: u32) -> (f32, f32) {
+        return self.inner_expr.range(domain, num_samples);
+    }
+
+    pub fn linear_transform_to_range(
+        self,
+        original_range: (f32, f32),
+        desired_range: (f32, f32),
+    ) -> Self {
+        Self {
+            num_variables: self.num_variables,
+            inner_expr: self
+                .inner_expr
+                .linear_transform_to_range(original_range, desired_range),
+        }
+    }
+
+    /// Returns a formatted string of the expression. Variables are represented with `x0`, `x1`, etc.
+    pub fn to_string(&self) -> String {
+        self.inner_expr.to_string()
+    }
+}
+
+impl ExprInner {
+    /// Generates the inner expression.
+    fn generate_with_rng<R: Rng + ?Sized>(
+        rng: &mut R,
+        depth: u32,
+        final_config: RandExprCfgFinal<'_>,
+    ) -> ExprInner {
         // TODO: allow weights as arguments
 
-        let variable_weights = [1.0, 1.0];
-        let variable_dist = WeightedIndex::new(variable_weights).unwrap();
+        let RandExprCfgFinal(config) = final_config;
+
+        let variable_dist = if let Some(ws) = config.variable_weights {
+            WeightedIndex::new(ws).unwrap()
+        } else {
+            WeightedIndex::new(std::iter::repeat_n(1.0, config.num_variables)).unwrap()
+        };
 
         // Chances that we choose to do an operation and keep recursing
         // Decreases as depth increases to lower chances of stack overflow
-        let op_expr_weight = (1.0 / (depth as f32 + 1.0)) * 25.0;
+        let op_expr_weight = (1.0 / (depth as f32 + 1.0)) * config.weight_go_deeper;
 
         let expr_weights = [1.0, 1.0, op_expr_weight];
         let expr_dist = WeightedIndex::new(expr_weights).unwrap();
@@ -41,133 +180,129 @@ impl Expr {
 
         // TODO: Increase literal range and bias towards lower numbers
         match expr_dist.sample(rng) {
-            0 => Expr::Variable(variable_dist.sample(rng)),
-            1 => Expr::Literal(Uniform::new(0.0, 255.0).unwrap().sample(rng)),
-            2 => Expr::Operation(Box::new(match op_dist.sample(rng) {
-                0 => Operation::Add(Expr::random(rng, depth + 1), Expr::random(rng, depth + 1)),
-                1 => Operation::Sub(Expr::random(rng, depth + 1), Expr::random(rng, depth + 1)),
-                2 => Operation::Mul(Expr::random(rng, depth + 1), Expr::random(rng, depth + 1)),
-                3 => Operation::Div(Expr::random(rng, depth + 1), Expr::random(rng, depth + 1)),
-                4 => Operation::Mod(Expr::random(rng, depth + 1), Expr::random(rng, depth + 1)),
-                5 => Operation::Pow(Expr::random(rng, depth + 1), Expr::random(rng, depth + 1)),
-                6 => Operation::Log(Expr::random(rng, depth + 1)),
-                7 => Operation::Sin(Expr::random(rng, depth + 1)),
-                8 => Operation::Cos(Expr::random(rng, depth + 1)),
-                9 => Operation::Tan(Expr::random(rng, depth + 1)),
-                10 => Operation::ASin(Expr::random(rng, depth + 1)),
-                11 => Operation::ACos(Expr::random(rng, depth + 1)),
-                12 => Operation::ATan(Expr::random(rng, depth + 1)),
-                13 => Operation::Radians(Expr::random(rng, depth + 1)),
-                14 => Operation::Degrees(Expr::random(rng, depth + 1)),
-                15 => Operation::Sqrt(Expr::random(rng, depth + 1)),
-                16 => Operation::Fract(Expr::random(rng, depth + 1)),
-                17 => Operation::Reciprocal(Expr::random(rng, depth + 1)),
+            0 => ExprInner::Variable(variable_dist.sample(rng)),
+            1 => ExprInner::Literal(Uniform::new(0.0, 255.0).unwrap().sample(rng)),
+            2 => ExprInner::Operation(Box::new(match op_dist.sample(rng) {
+                0 => Operation::Add(
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                ),
+                1 => Operation::Sub(
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                ),
+                2 => Operation::Mul(
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                ),
+                3 => Operation::Div(
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                ),
+                4 => Operation::Mod(
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                ),
+                5 => Operation::Pow(
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                    ExprInner::generate_with_rng(rng, depth + 1, final_config),
+                ),
+                6 => Operation::Log(ExprInner::generate_with_rng(rng, depth + 1, final_config)),
+                7 => Operation::Sin(ExprInner::generate_with_rng(rng, depth + 1, final_config)),
+                8 => Operation::Cos(ExprInner::generate_with_rng(rng, depth + 1, final_config)),
+                9 => Operation::Tan(ExprInner::generate_with_rng(rng, depth + 1, final_config)),
+                10 => Operation::ASin(ExprInner::generate_with_rng(rng, depth + 1, final_config)),
+                11 => Operation::ACos(ExprInner::generate_with_rng(rng, depth + 1, final_config)),
+                12 => Operation::ATan(ExprInner::generate_with_rng(rng, depth + 1, final_config)),
+                13 => {
+                    Operation::Radians(ExprInner::generate_with_rng(rng, depth + 1, final_config))
+                }
+                14 => {
+                    Operation::Degrees(ExprInner::generate_with_rng(rng, depth + 1, final_config))
+                }
+                15 => Operation::Sqrt(ExprInner::generate_with_rng(rng, depth + 1, final_config)),
+                16 => Operation::Fract(ExprInner::generate_with_rng(rng, depth + 1, final_config)),
+                17 => Operation::Reciprocal(ExprInner::generate_with_rng(
+                    rng,
+                    depth + 1,
+                    final_config,
+                )),
                 _ => unreachable!(),
             })),
             _ => unreachable!(),
         }
     }
 
-    fn to_glsl((r, g, b): &(Expr, Expr, Expr)) -> Result<String, std::fmt::Error> {
-        let mut o = String::new();
-        let var_names = [String::from("x"), String::from("y")];
+    // fn to_glsl((r, g, b): &(ExprInner, ExprInner, ExprInner)) -> Result<String, std::fmt::Error> {
+    //     let mut o = String::new();
+    //     let var_names = [String::from("x"), String::from("y")];
 
-        write!(&mut o, "precision highp float;")?;
-        write!(
-            &mut o,
-            "void mainImage(out vec4 fragColor, in vec2 fragCoord) {{"
-        )?;
+    //     write!(&mut o, "precision highp float;")?;
+    //     write!(
+    //         &mut o,
+    //         "void mainImage(out vec4 fragColor, in vec2 fragCoord) {{"
+    //     )?;
 
-        write!(&mut o, "vec2 uv = fragCoord / iResolution.xy;")?;
-        write!(&mut o, "float x = uv.x;")?;
-        write!(&mut o, "float y = uv.y;")?;
-        
-        write!(&mut o, "float r = {};", r.to_formattable(&var_names))?;
-        write!(&mut o, "float g = {};", g.to_formattable(&var_names))?;
-        write!(&mut o, "float b = {};", b.to_formattable(&var_names))?;
+    //     write!(&mut o, "vec2 uv = fragCoord / iResolution.xy;")?;
+    //     write!(&mut o, "float x = uv.x;")?;
+    //     write!(&mut o, "float y = uv.y;")?;
 
-        write!(&mut o, "fragColor = vec4(r, g, b, 1.0);")?;
+    //     write!(&mut o, "float r = {};", r.to_formattable(&var_names))?;
+    //     write!(&mut o, "float g = {};", g.to_formattable(&var_names))?;
+    //     write!(&mut o, "float b = {};", b.to_formattable(&var_names))?;
 
-        write!(&mut o, "}}")?;
+    //     write!(&mut o, "fragColor = vec4(r, g, b, 1.0);")?;
 
-        Ok(o)
-    }
+    //     write!(&mut o, "}}")?;
 
-    fn to_string(&self, var_names: &[String]) -> String {
+    //     Ok(o)
+    // }
+
+    fn to_string(&self) -> String {
         match self {
-            Expr::Variable(idx) => var_names[*idx].clone(),
-            Expr::Literal(x) if x.fract() == 0.0 => x.to_string() + ".0",
-            Expr::Literal(x) => x.to_string(),
-            Expr::Operation(op) => match op.as_ref() {
+            ExprInner::Variable(idx) => format!("x{}", idx),
+            ExprInner::Literal(x) if x.fract() == 0.0 => x.to_string() + ".0",
+            ExprInner::Literal(x) => x.to_string(),
+            ExprInner::Operation(op) => match op.as_ref() {
                 Operation::Add(left, right) => {
-                    '('.to_string()
-                        + &left.to_string(var_names)
-                        + "+"
-                        + &right.to_string(var_names)
-                        + ")"
+                    '('.to_string() + &left.to_string() + "+" + &right.to_string() + ")"
                 }
                 Operation::Sub(left, right) => {
-                    '('.to_string()
-                        + &left.to_string(var_names)
-                        + "-"
-                        + &right.to_string(var_names)
-                        + ")"
+                    '('.to_string() + &left.to_string() + "-" + &right.to_string() + ")"
                 }
                 Operation::Mul(left, right) => {
-                    '('.to_string()
-                        + &left.to_string(var_names)
-                        + "*"
-                        + &right.to_string(var_names)
-                        + ")"
+                    '('.to_string() + &left.to_string() + "*" + &right.to_string() + ")"
                 }
                 Operation::Div(left, right) => {
-                    '('.to_string()
-                        + &left.to_string(var_names)
-                        + "/"
-                        + &right.to_string(var_names)
-                        + ")"
+                    '('.to_string() + &left.to_string() + "/" + &right.to_string() + ")"
                 }
                 Operation::Mod(left, right) => {
-                    "mod(".to_string()
-                        + &left.to_string(var_names)
-                        + ","
-                        + &right.to_string(var_names)
-                        + ")"
+                    "mod(".to_string() + &left.to_string() + "," + &right.to_string() + ")"
                 }
                 Operation::Pow(left, right) => {
-                    "pow(".to_string()
-                        + &left.to_string(var_names)
-                        + ","
-                        + &right.to_string(var_names)
-                        + ")"
+                    "pow(".to_string() + &left.to_string() + "," + &right.to_string() + ")"
                 }
-                Operation::Log(left) => "log(".to_string() + &left.to_string(var_names) + ")",
-                Operation::Sin(left) => "sin(".to_string() + &left.to_string(var_names) + ")",
-                Operation::Cos(left) => "cos(".to_string() + &left.to_string(var_names) + ")",
-                Operation::Tan(left) => "tan(".to_string() + &left.to_string(var_names) + ")",
-                Operation::ASin(left) => "asin(".to_string() + &left.to_string(var_names) + ")",
-                Operation::ACos(left) => "acos(".to_string() + &left.to_string(var_names) + ")",
-                Operation::ATan(left) => "atan(".to_string() + &left.to_string(var_names) + ")",
-                Operation::Radians(left) => {
-                    "radians(".to_string() + &left.to_string(var_names) + ")"
-                }
-                Operation::Degrees(left) => {
-                    "degrees(".to_string() + &left.to_string(var_names) + ")"
-                }
-                Operation::Sqrt(left) => "sqrt(".to_string() + &left.to_string(var_names) + ")",
-                Operation::Fract(left) => "fract(".to_string() + &left.to_string(var_names) + ")",
-                Operation::Reciprocal(left) => {
-                    "(1.0/".to_string() + &left.to_string(var_names) + ")"
-                }
+                Operation::Log(left) => "log(".to_string() + &left.to_string() + ")",
+                Operation::Sin(left) => "sin(".to_string() + &left.to_string() + ")",
+                Operation::Cos(left) => "cos(".to_string() + &left.to_string() + ")",
+                Operation::Tan(left) => "tan(".to_string() + &left.to_string() + ")",
+                Operation::ASin(left) => "asin(".to_string() + &left.to_string() + ")",
+                Operation::ACos(left) => "acos(".to_string() + &left.to_string() + ")",
+                Operation::ATan(left) => "atan(".to_string() + &left.to_string() + ")",
+                Operation::Radians(left) => "radians(".to_string() + &left.to_string() + ")",
+                Operation::Degrees(left) => "degrees(".to_string() + &left.to_string() + ")",
+                Operation::Sqrt(left) => "sqrt(".to_string() + &left.to_string() + ")",
+                Operation::Fract(left) => "fract(".to_string() + &left.to_string() + ")",
+                Operation::Reciprocal(left) => "(1.0/".to_string() + &left.to_string() + ")",
             },
         }
     }
 
     fn eval(&self, vars: &[f32]) -> f32 {
         match self {
-            Expr::Variable(idx) => vars[*idx],
-            Expr::Literal(num) => *num,
-            Expr::Operation(op) => match op.as_ref() {
+            &ExprInner::Variable(idx) => vars[idx],
+            &ExprInner::Literal(num) => num,
+            ExprInner::Operation(op) => match op.as_ref() {
                 Operation::Add(left, right) => left.eval(vars) + right.eval(vars),
                 Operation::Sub(left, right) => left.eval(vars) - right.eval(vars),
                 Operation::Mul(left, right) => left.eval(vars) * right.eval(vars),
@@ -190,28 +325,29 @@ impl Expr {
         }
     }
 
-    fn to_formattable<'a>(&'a self, var_names: &'a [String]) -> ExprFmt<'a> {
-        ExprFmt {
-            expr: self,
-            var_names,
-        }
-    }
-
-    fn range(&self, (x_min, x_max): (f32, f32), (y_min, y_max): (f32, f32)) -> (f32, f32) {
+    /// Accepts the domain of the parameters and returns the range of the expression over that domain, established with `num_samples` samples randomly distributed.
+    // TODO: pass rng
+    fn range(&self, domain: &[(f32, f32)], num_samples: u32) -> (f32, f32) {
         let mut min = f32::MAX;
         let mut max = f32::MIN;
 
-        for x in 0..=100 {
-            let x = lerp(x_min, x_max, x as f32 / 100.0);
+        let mut rng = rand::rng();
 
-            for y in 0..=100 {
-                let y = lerp(y_min, y_max, y as f32 / 100.0);
+        let mut test_vars = vec![0.0; domain.len()].into_boxed_slice();
+        for _ in 0..num_samples {
+            for (var_domain, var) in domain.iter().zip(test_vars.iter_mut()) {
+                *var = rng.random_range(var_domain.0..var_domain.1);
+            }
 
-                let res = self.eval(&[x, y]).clamp(-10000.0, 10000.0);
-                let res = if res.is_normal() { res } else { 0.0 };
+            let val = self.eval(&test_vars);
 
-                min = res.min(min);
-                max = res.max(max);
+            if val.is_normal() {
+                if val > max {
+                    max = val;
+                }
+                if val < min {
+                    min = val;
+                }
             }
         }
 
@@ -219,124 +355,46 @@ impl Expr {
     }
 
     // TODO: Fix with more ways than linear interpolation
-    fn fix(mut self, (expr_min, expr_max): (f32, f32), min: f32, max: f32) -> Expr {
-        let dist = min - expr_min;
-        let diff = expr_max - expr_min;
-        let factor = max / diff;
+    fn linear_transform_to_range(
+        mut self,
+        (original_min, original_max): (f32, f32),
+        (desired_min, desired_max): (f32, f32),
+    ) -> ExprInner {
+        let dist = desired_min - original_min;
+        let diff = original_max - original_min;
+        let factor = desired_max / diff;
         let factor = if factor.is_normal() { factor } else { 1.0 };
 
         if dist != 0.0 {
-            self = Expr::Operation(Box::new(Operation::Add(self, Expr::Literal(dist))));
+            self = ExprInner::Operation(Box::new(Operation::Add(self, ExprInner::Literal(dist))));
         }
 
         if factor != 1.0 {
-            self = Expr::Operation(Box::new(Operation::Mul(self, Expr::Literal(factor))));
+            self = ExprInner::Operation(Box::new(Operation::Mul(self, ExprInner::Literal(factor))));
         }
 
         self
     }
 }
 
-fn lerp(start: f32, end: f32, amount: f32) -> f32 {
-    start + (end - start) * amount
-}
-
-struct ExprFmt<'a> {
-    expr: &'a Expr,
-    var_names: &'a [String],
-}
-
-impl<'a> Display for ExprFmt<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.expr.to_string(self.var_names))?;
-
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone)]
 enum Operation {
-    Add(Expr, Expr),
-    Sub(Expr, Expr),
-    Mul(Expr, Expr),
-    Div(Expr, Expr),
-    Mod(Expr, Expr),
-    Pow(Expr, Expr),
-    Log(Expr),
-    Sin(Expr),
-    Cos(Expr),
-    Tan(Expr),
-    ASin(Expr),
-    ACos(Expr),
-    ATan(Expr),
-    Radians(Expr),
-    Degrees(Expr),
-    Sqrt(Expr),
-    Fract(Expr),
-    Reciprocal(Expr),
-}
-
-/// Will generate an `RgbImage` using ratnest's expression generator
-pub fn generate_image(width: u32, height: u32) -> RgbImage {
-    let mut img = RgbImage::new(width, height);
-
-    let mut rng = ChaCha20Rng::from_os_rng();
-    // let seed = rng.get_seed();
-
-    let expr: (Expr, Expr, Expr) = (
-        Expr::random(&mut rng, 0),
-        Expr::random(&mut rng, 0),
-        Expr::random(&mut rng, 0),
-    );
-
-    let expr = (
-        {
-            let range = expr.0.range((0.0, 1.0), (0.0, 1.0));
-            expr.0.fix(range, 0.0, 1.0)
-        },
-        {
-            let range = expr.1.range((0.0, 1.0), (0.0, 1.0));
-            expr.1.fix(range, 0.0, 1.0)
-        },
-        {
-            let range = expr.2.range((0.0, 1.0), (0.0, 1.0));
-            expr.2.fix(range, 0.0, 1.0)
-        },
-    );
-
-    // let glsl = Expr::to_glsl(&expr).unwrap();
-
-    // let variable_names = &[String::from("x"), String::from("y")];
-
-    // dbg!(&expr);
-    // println!("red: {}", expr.0.to_formattable(variable_names));
-    // println!("green: {}", expr.1.to_formattable(variable_names));
-    // println!("blue: {}", expr.2.to_formattable(variable_names));
-    // println!("{}", glsl);
-
-    for (x, y, Rgb(color)) in img.enumerate_pixels_mut() {
-        // 0.0 - 1.0 value coords
-        let x = x as f32 / width as f32;
-        let y = 1.0 - y as f32 / height as f32;
-
-        *color = [
-            expr.0.eval(&[x, y]) as u8,
-            expr.1.eval(&[x, y]) as u8,
-            expr.2.eval(&[x, y]) as u8,
-        ];
-    }
-
-    img
-}
-
-pub fn generate_image_with_seed() -> RgbImage {
-    todo!()
-}
-
-pub fn generate_glsl() -> String {
-    todo!()
-}
-
-pub fn generate_glsl_with_seed() -> String {
-    todo!()
+    Add(ExprInner, ExprInner),
+    Sub(ExprInner, ExprInner),
+    Mul(ExprInner, ExprInner),
+    Div(ExprInner, ExprInner),
+    Mod(ExprInner, ExprInner),
+    Pow(ExprInner, ExprInner),
+    Log(ExprInner),
+    Sin(ExprInner),
+    Cos(ExprInner),
+    Tan(ExprInner),
+    ASin(ExprInner),
+    ACos(ExprInner),
+    ATan(ExprInner),
+    Radians(ExprInner),
+    Degrees(ExprInner),
+    Sqrt(ExprInner),
+    Fract(ExprInner),
+    Reciprocal(ExprInner),
 }
