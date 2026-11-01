@@ -11,7 +11,8 @@ pub fn generate_image(width: u32, height: u32) -> RgbImage {
     let mut img = RgbImage::new(width, height);
 
     let mut rng = ChaCha20Rng::from_os_rng();
-    // let seed = rng.get_seed();
+    let seed = rng.get_seed();
+    println!("{:?}", seed);
 
     let options = RandExprCfg{
         num_variables: 2,

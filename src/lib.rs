@@ -6,6 +6,7 @@ use rand::{
 };
 use rand_chacha::ChaCha20Rng;
 
+/// Internal representation of a ratnest expression.
 #[derive(Debug, Clone)]
 enum ExprInner {
     /// Zero-indexed reference to an input variable (e.g., x = `Variable(0)` and y = `Variable(1)`).
@@ -17,6 +18,7 @@ enum ExprInner {
 }
 
 /// A numeric expression that accepts a set number of input parameters.
+#[derive(Debug, Clone)]
 pub struct Expr {
     num_variables: usize,
     inner_expr: ExprInner,
@@ -42,18 +44,18 @@ pub struct RandExprCfg<'a> {
     /// ```
     /// RandomExprOptions {
     ///     // ...
-    ///     variable_weights: Some(&[2.0, 1.0, 1.0]),
+    ///     variable_weights: Some(&[0.5, 0.25, 0.25]),
     ///     // ...
     /// }
     /// ```
     ///
-    /// You could have equivalently chosen `[0.5, 0.25, 0.25]` or `[12.2, 6.1, 6.1]`.
+    /// You could have equivalently chosen `[2, 1, 1]` or `[12.2, 6.1, 6.1]`.
     pub variable_weights: Option<&'a [f32]>,
     // TODO: more! see `todo.md`
 }
 
 impl<'a> RandExprCfg<'a> {
-    // Returns the default configuration for random expression generation.
+    /// Returns the default configuration for random expression generation.
     pub fn default() -> Self {
         Self {
             num_variables: 1,
@@ -64,7 +66,7 @@ impl<'a> RandExprCfg<'a> {
 
     /// Finalizes the config into a wrapper that ratnest functions accept.
     ///
-    /// This is just here to ensure the data entered into the config is valid. `RandExprCfgFinal` has no public fields.
+    /// This is to ensure the data entered into the config is valid. `RandExprCfgFinal` has no public fields.
     pub fn finalize(self) -> Result<RandExprCfgFinal<'a>, RandExprCfgFinalizeErr> {
         if let Some(weights) = self.variable_weights
             && weights.len() != self.num_variables
@@ -80,7 +82,7 @@ impl<'a> RandExprCfg<'a> {
     }
 }
 
-/// The finalized version of a [`RandExprCfg`], the existence of which guarantees its validity (no public fields!) hence it is the config type that ratnest functions accept.
+/// The finalized version of a [`RandExprCfg`], the existence of which guarantees its validity, hence it is the config type that ratnest functions accept.
 #[derive(Clone, Copy)]
 pub struct RandExprCfgFinal<'a>(RandExprCfg<'a>);
 
@@ -107,7 +109,7 @@ impl Expr {
 
     /// Generate a random expression.
     ///
-    /// This function uses [`rand_chacha::ChaCha20Rng`] for a random number generator internally. If you wish to use your own, see [`random_with_rng()`](Expr::random_with_rng).
+    /// This function uses [`rand_chacha::ChaCha20Rng`] for a random number generator internally. If you wish to use your own, see [`random_with_rng()`](Expr::generate_with_rng).
     pub fn generate(config: RandExprCfgFinal<'_>) -> Self {
         let mut rng = ChaCha20Rng::from_os_rng();
 
@@ -354,23 +356,28 @@ impl ExprInner {
         (min, max)
     }
 
-    // TODO: Fix with more ways than linear interpolation
+    /// Performs a linear transformation on the expression (with a provided range) such that its range is now the desired one.
+    /// 
+    /// If `self` has a range of \[a<sub>0</sub>, b<sub>0</sub>\], and you want to superficially transform it to be \[a<sub>1</sub>, b<sub>1</sub>\], then this function returns
+    /// (`self`&minus;a<sub>0</sub>)&times;(b<sub>1</sub>&minus;a<sub>1</sub>)/(b<sub>0</sub>&minus;a<sub>0</sub>)&plus;a<sub>1</sub> (not exactly, it just keeps it to the equivalent `y = mx + b` form in the interest of minimizing allocation).
     fn linear_transform_to_range(
         mut self,
         (original_min, original_max): (f32, f32),
         (desired_min, desired_max): (f32, f32),
     ) -> ExprInner {
-        let dist = desired_min - original_min;
-        let diff = original_max - original_min;
-        let factor = desired_max / diff;
-        let factor = if factor.is_normal() { factor } else { 1.0 };
-
-        if dist != 0.0 {
-            self = ExprInner::Operation(Box::new(Operation::Add(self, ExprInner::Literal(dist))));
-        }
+        let factor = (|factor: f32| if factor.is_finite() { factor } else { 1.0 })(
+            (desired_max - desired_min) / (original_max - original_min)
+        );
+        let offset = (|offset: f32| if offset.is_finite() { offset } else { 0.0 })(
+            desired_min - original_min * factor
+        );
 
         if factor != 1.0 {
             self = ExprInner::Operation(Box::new(Operation::Mul(self, ExprInner::Literal(factor))));
+        }
+
+        if offset != 0.0 {
+            self = ExprInner::Operation(Box::new(Operation::Add(self, ExprInner::Literal(offset))));
         }
 
         self
